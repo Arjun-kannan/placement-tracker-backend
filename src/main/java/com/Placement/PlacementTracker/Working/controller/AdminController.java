@@ -15,8 +15,7 @@ import java.io.IOException;
 
 @RestController
 @RequiredArgsConstructor
-//@PreAuthorize("hasRole('ADMIN')")
-@PreAuthorize("ADMIN")
+@PreAuthorize("hasRole('ADMIN')")
 @RequestMapping("/admin")
 public class AdminController {
 
