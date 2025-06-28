@@ -1,34 +1,63 @@
 # syntax=docker/dockerfile:1
 
-# STEP 1: Use JDK base image to build the app
-FROM eclipse-temurin:17-jdk-jammy AS build
+################################################################################
+# Step 1: Resolve and download dependencies
+FROM eclipse-temurin:17-jdk-jammy as deps
 
-WORKDIR /app
+WORKDIR /build
 
-# Copy Maven files first for better caching
+# Copy Maven wrapper with executable permissions
 COPY mvnw .
-COPY .mvn .mvn
+COPY .mvn/ .mvn/
 COPY pom.xml .
 
-# Download dependencies (skip tests to speed up)
+# Ensure wrapper is executable
+RUN chmod +x mvnw
+
+# Download dependencies (no BuildKit mount)
 RUN ./mvnw dependency:go-offline -DskipTests
 
-# Now copy the source and build the jar
+################################################################################
+# Step 2: Build the application
+FROM deps as package
+
+WORKDIR /build
+
 COPY src ./src
-RUN ./mvnw clean package -DskipTests
 
-# STEP 2: Use JRE base image to run the app
-FROM eclipse-temurin:17-jre-jammy
+RUN ./mvnw package -DskipTests && \
+    mv target/$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout)-$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout).jar target/app.jar
 
-# Create a user to run the app securely
-RUN adduser --disabled-password --gecos "" appuser
+################################################################################
+# Step 3: Extract Spring Boot layers
+FROM package as extract
+
+WORKDIR /build
+RUN java -Djarmode=layertools -jar target/app.jar extract --destination target/extracted
+
+################################################################################
+# Step 4: Final image for runtime
+FROM eclipse-temurin:17-jre-jammy AS final
+
+ARG UID=10001
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --home "/nonexistent" \
+    --shell "/sbin/nologin" \
+    --no-create-home \
+    --uid "${UID}" \
+    appuser
 USER appuser
 
 WORKDIR /app
 
-# Copy the fat jar built in the previous step
-COPY --from=build /app/target/*.jar app.jar
+# Copy Spring Boot layer folders from extract stage
+COPY --from=extract /build/target/extracted/dependencies/ ./
+COPY --from=extract /build/target/extracted/spring-boot-loader/ ./
+COPY --from=extract /build/target/extracted/snapshot-dependencies/ ./
+COPY --from=extract /build/target/extracted/application/ ./
 
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
